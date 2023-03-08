@@ -8,88 +8,108 @@ cors = CORS(app)
 app.config['CORS_HEADERS'] = 'Content-Type'
 openai.api_key = ""
 
-bd = {}
+db = {}
 
 @app.route("/get-continue-story", methods=["GET"])
 def get_continue_story():
     args  = request.args
 
-    print(args)
+    if args['id'] not in db.keys() and not len(args['decision']):
+        db[args['id']] = [
+            {"role": "system", "content": f"""You're a story writer. The mood of the story: {args['mood']}. 
+                                            The main character: {args['mainCharacter']}. 
+                                            Setting of the story: {args['settingStory']}."""}]
 
-    if args['id'] not in bd.keys():
-        bd[args['id']] = ''
+    if args['id'] not in db.keys() and len(args['decision']):
+        db[args['id']] = [
+            {"role": "system", "content": f"""You're a story writer.
+                                            The beginning of the story is as follows: {args['decision']}"""}]
+        args['decision'] = ""
 
-    param = {}
-    if len(args['mood']) and len(args['mainCharacter']) and len(args['settingStory']):
-        param['mood'] = args['mood']
-        param['mainCharacter'] = args['mainCharacter']
-        param['settingStory'] = args['settingStory']
-
-    dopDec = ''
     if len(args['decision']):
-        bd[args['id']] += '\n\n' + str(args['decision'])
-        dopDec = '\n\n' + str(args['decision'])
+        db[args['id']].append({"role": "assistant", "content": args['decision']})
+    
+    db[args['id']].append({"role": "user", "content": args['storyPoint']})
 
     try:
-        response = openai.Completion.create(
-            model="text-davinci-003",
-            prompt=generate_request(bd[args['id']], args['storyPoint'], param),
-            temperature=1,
-            max_tokens=500
+        completion = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=db[args['id']],
+            temperature=0.8,
+            max_tokens=340
         )
-    except:
-        with open('./bd.txt', 'a') as fl:
-            fl.write(f"{str(args['id'])}{str(bd[args['id']])}")
-        return jsonify({ "ok": False}), 500
 
-    resp = dopDec + str(response.choices[0].text)
+        db[args['id']].append(completion.choices[0].message)
+    except Exception as e:
+        print(e)
+        return jsonify({ "ok": False, "error": str(e)}), 500
 
-    bd[args['id']] += resp
+    resp = args['decision'] + completion.choices[0].message.content
 
     if resp[-1] !=  '.':
         resp = crop_text(resp)
-    print(resp)
-    if args['storyPoint'] == 'Continue the story – more dialogues, fewer descriptions of actions. This is a continuation of the story with a plot denouement that will lead to a happy ending.':
+
+    
+    if 'happy ending' in args['storyPoint']:
         with open('./bd.txt', 'a') as fl:
-            fl.write(f"{str(args['id'])}{str(bd[args['id']])}")
+            story = '\n'.join([i['content'] for i in db[args['id']]])
+            fl.write(f"""{args['id']}
+                    {story}""" + "\n")
+
     return jsonify({ "ok": True, "new_part": resp })
+
 
 @app.route("/decisions", methods=["GET"])
 def get_story_decisions():
     args  = request.args
 
-    print(args)
-
     while True:
-        response = openai.Completion.create(
-            model="text-davinci-003",
-            prompt=generate_dicision(bd[args['id']]),
-            temperature=0.8,
-            max_tokens=500
+        completion = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=get_decision(db[args['id']]),
+            temperature=0.5,
+            max_tokens=340
         )
-
-        resp = response.choices[0].text
-        print(resp)
         
+        resp = completion.choices[0].message.content
+        print(resp)
+
         try:
             res = response_processing(resp)
-        except:
+            if len(res.keys()) != 3:
+                continue
+        except Exception as e:
+            print(e)
             continue
         else:
             break
 
     return jsonify({ "ok": True, "data": res })
 
-def generate_request(full_story, point, param):
-    if len(param.keys()) == 0:
-        return f"{full_story} {point}"
-    return f"{full_story}\n\nThe mood of the story: {param['mood']}. The main character: {param['mainCharacter']}. Setting of the story: {param['settingStory']}.\n\n{point} The story should be in the format of a dialogue in which the characters and the author of the narrative participate."
-
-def generate_dicision(full_story):
-    return f"{full_story}\n\nWrite 3 branches of the story plot and the short name of this branch in the json object format, where the key is the short name of the branch and the value is the text."
-        
 def response_processing(resp):
-    return json.loads(resp.replace('\n', ''))
+    result = {}
+    mas = [i for i in resp.split('{')][1:]
+    mas = [i.split('}') for i in mas]
+    mas = [i[0].replace('\n', '') for i in mas]
+
+    for m in mas:
+        c = m.split(':')
+        c = [i.split('"') for i in c]
+        result[c[0][1]] = c[1][1]
+
+    return json.loads(json.dumps(result))
+
+def get_decision(db):
+    return db + [{
+        "role": "user", "content": """Come up with three short different story continuations.
+Write them to me in json format, where the key is the name of the continuation, and the value is the text.
+Output example:
+{
+'name_story': 'value',
+'name_story': 'value',
+'name_story': 'value'
+}"""
+    }]
 
 def crop_text(text):
     text_arr = text.split(".")
